@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="ms">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Offline Playlist — Minimal Player</title>
+  <meta name="theme-color" content="#0b0b0f" />
+  <style>
+    :root{--bg:#0b0b0f;--panel:#0f1114;--muted:#9aa0a6;--accent:#7c4dff}
+    *{box-sizing:border-box}
+    body{margin:0;font-family:Inter,system-ui,Segoe UI,Roboto,Arial;color:#e8eef8;background:linear-gradient(180deg,#060606,#0b0b0f);min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
+    .app{width:100%;max-width:860px}
+    .player{background:linear-gradient(180deg, rgba(255,255,255,0.02), transparent);border-radius:14px;padding:18px;box-shadow:0 8px 32px rgba(2,6,23,0.7);display:flex;gap:18px;align-items:center}
+    .cover{width:128px;height:128px;border-radius:12px;background:linear-gradient(180deg,#111,#0b0b0f);display:flex;align-items:center;justify-content:center;font-size:24px;color:var(--muted)}
+    .meta{flex:1;min-width:0}
+    .title{font-size:18px;font-weight:700;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .artist{font-size:13px;color:var(--muted);margin-top:6px}
+    .controls{display:flex;align-items:center;gap:10px;margin-top:12px}
+    .btn{background:transparent;border:1px solid rgba(255,255,255,0.04);padding:10px 12px;border-radius:10px;color:var(--muted);cursor:pointer}
+    .btn.big{font-size:16px;padding:12px 18px}
+    .seek{width:320px}
+    .playlist-mini{margin-top:12px;max-height:160px;overflow:auto;border-radius:10px;padding:8px;background:rgba(255,255,255,0.02)}
+    .track{padding:8px;border-radius:8px;display:flex;justify-content:space-between;align-items:center;gap:10px}
+    .track:hover{background:rgba(255,255,255,0.02)}
+    .small{font-size:13px;color:var(--muted)}
+    input[type=file]{display:none}
+    footer{margin-top:12px;font-size:12px;color:var(--muted);text-align:center}
+    @media(max-width:720px){.player{flex-direction:column;align-items:stretch}.seek{width:100%}.cover{width:96px;height:96px}}
+  </style>
+</head>
+<body>
+  <div class="app">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+      <h2 style="margin:0">Offline Playlist — Minimal</h2>
+      <div style="display:flex;gap:8px;align-items:center">
+        <label class="btn">Tambah Lagu<input id="fileInput" type="file" accept="audio/*" multiple></label>
+        <button id="clearAll" class="btn">Kosongkan</button>
+      </div>
+    </div>
+
+    <div class="player">
+      <div class="cover" id="cover">🎵</div>
+      <div class="meta">
+        <div class="title" id="nowTitle">Tiada lagu dimainkan</div>
+        <div class="artist" id="nowArtist">-</div>
+
+        <div class="controls">
+          <button id="prevBtn" class="btn">◀◀</button>
+          <button id="playPause" class="btn big">Play</button>
+          <button id="nextBtn" class="btn">▶▶</button>
+          <input id="seek" class="seek" type="range" min="0" max="100" value="0">
+          <div class="small" id="time">00:00 / 00:00</div>
+        </div>
+
+        <div class="playlist-mini" id="playlist"></div>
+      </div>
+    </div>
+
+    <footer>Lagu disimpan pada IndexedDB — boleh dimainkan tanpa internet. Jika clear data browser, lagu akan hilang.</footer>
+  </div>
+
+  <audio id="audio" crossorigin></audio>
+
+  <script>
+  // ---------- CONFIG ----------
+  const DB_NAME = 'offline-playlist-db';
+  const DB_VERSION = 1;
+  const STORE = 'songs';
+
+  // ---------- IDB HELPERS ----------
+  function openDB(){
+    return new Promise((res, rej)=>{
+      const req = indexedDB.open(DB_NAME, DB_VERSION);
+      req.onupgradeneeded = e => {
+        const db = e.target.result;
+        if(!db.objectStoreNames.contains(STORE)){
+          const s = db.createObjectStore(STORE, { keyPath: 'id' });
+          s.createIndex('created','created');
+        }
+      }
+      req.onsuccess = ()=>res(req.result);
+      req.onerror = ()=>rej(req.error);
+    });
+  }
+  async function idbPut(item){ const db = await openDB(); return new Promise((res,rej)=>{ const tx = db.transaction(STORE,'readwrite'); tx.objectStore(STORE).put(item); tx.oncomplete=()=>res(true); tx.onerror=()=>rej(tx.error); }); }
+  async function idbGetAll(){ const db = await openDB(); return new Promise((res,rej)=>{ const tx = db.transaction(STORE,'readonly'); const req = tx.objectStore(STORE).getAll(); req.onsuccess=()=>res(req.result); req.onerror=()=>rej(req.error); }); }
+  async function idbDelete(id){ const db = await openDB(); return new Promise((res,rej)=>{ const tx = db.transaction(STORE,'readwrite'); tx.objectStore(STORE).delete(id); tx.oncomplete=()=>res(true); tx.onerror=()=>rej(tx.error); }); }
+  async function idbClear(){ const db = await openDB(); return new Promise((res,rej)=>{ const tx = db.transaction(STORE,'readwrite'); tx.objectStore(STORE).clear(); tx.oncomplete=()=>res(true); tx.onerror=()=>rej(tx.error); }); }
+
+  function uid(){return Math.random().toString(36).slice(2,10)}
+
+  // ---------- UI REFS ----------
+  const fileInput = document.getElementById('fileInput');
+  const playlistEl = document.getElementById('playlist');
+  const countEl = document.getElementById('count');
+  const audio = document.getElementById('audio');
+  const nowTitle = document.getElementById('nowTitle');
+  const nowArtist = document.getElementById('nowArtist');
+  const playPause = document.getElementById('playPause');
+  const prevBtn = document.getElementById('prevBtn');
+  const nextBtn = document.getElementById('nextBtn');
+  const seek = document.getElementById('seek');
+  const timeEl = document.getElementById('time');
+  const coverEl = document.getElementById('cover');
+  const clearAllBtn = document.getElementById('clearAll');
+
+  let tracks = []; // metadata array from IDB
+  let currentIndex = -1;
+  let autoNext = true;
+
+  // ---------- LOAD TRACKS ----------
+  async function loadTracks(){
+    tracks = await idbGetAll();
+    tracks.sort((a,b)=>a.created-b.created);
+    renderPlaylist();
+  }
+
+  function renderPlaylist(){
+    playlistEl.innerHTML = '';
+    tracks.forEach((t,i)=>{
+      const tr = document.createElement('div'); tr.className='track';
+      const left = document.createElement('div'); left.style.overflow='hidden'; left.style.textOverflow='ellipsis'; left.style.whiteSpace='nowrap'; left.textContent = t.name;
+      const right = document.createElement('div');
+      const playB = document.createElement('button'); playB.className='btn'; playB.textContent='Play'; playB.onclick = ()=>playIndex(i);
+      const delB = document.createElement('button'); delB.className='btn'; delB.textContent='Delete'; delB.onclick = async ()=>{ if(confirm('Padam lagu ini?')){ await idbDelete(t.id); await loadTracks(); if(currentIndex===i) stopAudio(); }};
+      right.appendChild(playB); right.appendChild(delB);
+      tr.appendChild(left); tr.appendChild(right);
+      tr.style.display='flex'; tr.style.justifyContent='space-between'; tr.style.alignItems='center'; tr.style.gap='8px'; tr.style.padding='6px 4px';
+      playlistEl.appendChild(tr);
+    });
+  }
+
+  // ---------- ADD FILES ----------
+  fileInput.addEventListener('change', async (e)=>{
+    const files = Array.from(e.target.files);
+    for(const f of files){
+      const blob = f.slice(0,f.size,f.type);
+      const item = { id: uid(), name: f.name, size: f.size, type: f.type, created: Date.now(), blob };
+      await idbPut(item);
+    }
+    fileInput.value=''; await loadTracks();
+  });
+
+  // ---------- PLAYBACK via Service Worker / URL -------
+  function songUrl(id){ return `/song/${id}` }
+
+  async function playIndex(i){
+    if(i<0 || i>=tracks.length) return;
+    currentIndex = i;
+    const t = tracks[i];
+    nowTitle.textContent = t.name;
+    nowArtist.textContent = '';
+    coverEl.textContent = '🎵';
+
+    // set audio src to SW-served url
+    audio.src = songUrl(t.id);
+
+    // ensure AudioContext resumed on user interaction (some browsers require it)
+    resumeAudioContext();
+
+    audio.onloadedmetadata = ()=>{
+      audio.play().catch(err=>console.warn('play blocked',err));
+      playPause.textContent='Pause';
+    };
+  }
+
+  function stopAudio(){ audio.pause(); audio.currentTime=0; playPause.textContent='Play'; nowTitle.textContent='Tiada lagu dimainkan'; nowArtist.textContent='-'; currentIndex=-1 }
+
+  playPause.addEventListener('click', ()=>{
+    if(audio.paused){ if(currentIndex===-1 && tracks.length>0){ playIndex(0); } else audio.play(); playPause.textContent='Pause'; }
+    else{ audio.pause(); playPause.textContent='Play'; }
+  });
+  prevBtn.addEventListener('click', ()=>{ if(tracks.length===0) return; const idx = (currentIndex>0?currentIndex-1:tracks.length-1); playIndex(idx); });
+  nextBtn.addEventListener('click', ()=>{ if(tracks.length===0) return; const idx = (currentIndex+1)%tracks.length; playIndex(idx); });
+
+  audio.addEventListener('timeupdate', ()=>{
+    if(audio.duration){ const pct = (audio.currentTime/audio.duration)*100; seek.value = pct; timeEl.textContent = formatTime(audio.currentTime) + ' / ' + formatTime(audio.duration); }
+  });
+  audio.addEventListener('ended', ()=>{ if(autoNext){ const next = (currentIndex+1); if(next < tracks.length) playIndex(next); else stopAudio(); } });
+  seek.addEventListener('input', ()=>{ if(audio.duration) audio.currentTime = (seek.value/100)*audio.duration; });
+
+  function formatTime(s){ if(!s || isNaN(s)) return '00:00'; const m = Math.floor(s/60); const sec = Math.floor(s%60); return `${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}` }
+
+  clearAllBtn.addEventListener('click', async ()=>{ if(confirm('Buang semua lagu dari storan?')){ await idbClear(); await loadTracks(); stopAudio(); }});
+
+  // ---------- Visualizer (create AudioContext on demand) ----------
+  let audioCtx, analyser, sourceNode, dataArray;
+  function setupVisualizer(){
+    if(audioCtx) return;
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    analyser = audioCtx.createAnalyser(); analyser.fftSize = 256;
+    dataArray = new Uint8Array(analyser.frequencyBinCount);
+    try{
+      sourceNode = audioCtx.createMediaElementSource(audio);
+      sourceNode.connect(analyser);
+      analyser.connect(audioCtx.destination);
+    }catch(e){ console.warn('Visualizer setup failed',e); }
+    drawViz();
+  }
+  function resumeAudioContext(){
+    setupVisualizer();
+    if(audioCtx && audioCtx.state === 'suspended') audioCtx.resume().catch(()=>{});
+  }
+  const canvas = document.createElement('canvas'); canvas.width = 800; canvas.height = 120; canvas.style.width='100%'; canvas.style.height='120px'; canvas.style.marginTop='12px'; document.querySelector('.meta').appendChild(canvas);
+  const ctx = canvas.getContext('2d');
+  function drawViz(){ requestAnimationFrame(drawViz); if(!analyser) return; analyser.getByteFrequencyData(dataArray); ctx.clearRect(0,0,canvas.width,canvas.height); const barWidth = canvas.width / dataArray.length; for(let i=0;i<dataArray.length;i++){ const v = dataArray[i]/255; const h = v*canvas.height; ctx.fillStyle = 'rgba(124,77,255,0.9)'; ctx.fillRect(i*barWidth, canvas.height-h, barWidth*0.8, h); } }
+
+  // resume on first user interaction to satisfy autoplay policies
+  window.addEventListener('click', ()=>{ if(typeof resumeAudioContext === 'function') resumeAudioContext(); });
+
+  // ---------- Service Worker (inline fallback registration) ----------
+  if('serviceWorker' in navigator){
+    navigator.serviceWorker.register('/sw.js').then(()=>console.log('SW registered')).catch(()=>{
+      // try inline blob registration so local file demo works
+      (async ()=>{
+        try{
+          const swCode = `
+          const DB_NAME='${DB_NAME}'; const DB_VERSION=${DB_VERSION}; const STORE='${STORE}';
+          function openDB(){ return new Promise((res,rej)=>{ const req = indexedDB.open(DB_NAME, DB_VERSION); req.onsuccess=()=>res(req.result); req.onerror=()=>rej(req.error); req.onupgradeneeded=()=>{}; }); }
+          self.addEventListener('fetch', event=>{
+            const url = new URL(event.request.url);
+            if(url.pathname.startsWith('/song/')){
+              const id = url.pathname.split('/song/')[1];
+              event.respondWith((async ()=>{
+                try{
+                  const db = await openDB(); const tx = db.transaction(STORE,'readonly'); const req = tx.objectStore(STORE).get(id);
+                  const result = await new Promise((res,rej)=>{ req.onsuccess=()=>res(req.result); req.onerror=()=>rej(req.error); });
+                  if(result && result.blob){ return new Response(result.blob, { headers: { 'Content-Type': result.type || 'audio/mpeg' } }); }
+                }catch(err){}
+                return fetch(event.request);
+              })());
+            }
+            if(url.pathname.endsWith('/manifest.json')){
+              const manifest = { name:'Offline Playlist', short_name:'OfflinePlaylist', start_url:'.', display:'standalone', background_color:'#0b0b0f', theme_color:'#7c4dff', icons:[] };
+              event.respondWith(new Response(JSON.stringify(manifest), {headers:{'Content-Type':'application/json'}}));
+            }
+          });
+          `;
+          const blob = new Blob([swCode],{type:'application/javascript'});
+          const url = URL.createObjectURL(blob);
+          await navigator.serviceWorker.register(url);
+          console.log('Inline SW registered');
+        }catch(e){ console.warn('Inline SW failed', e); }
+      })();
+    });
+  }
+
+  // ---------- Init ----------
+  loadTracks();
+
+  // expose helper for SW to read idb if needed (not necessary here)
+  </script>
+</body>
+</html>
